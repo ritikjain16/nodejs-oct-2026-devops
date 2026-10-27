@@ -131,272 +131,464 @@
 #                   docker system prune -af
 #                   docker image prune -af
 
+# name: CI/CD - Build, DevSecOps, ECR and GitOps
+
+# on:
+#     push:
+#         branches:
+#             - master
+#         paths-ignore:
+#             - "k8s/**"
+
+#     pull_request:
+#         branches:
+#             - master
+
+#     workflow_dispatch:
+
+# permissions:
+#     contents: read
+
+# env:
+#     AWS_REGION: ${{ secrets.AWS_REGION }}
+#     AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+#     ECR_REPO: nodejs-oct-2026
+
+# jobs:
+#     checkout:
+#         name: Checkout Repository
+#         runs-on: ubuntu-latest
+
+#         outputs:
+#             commit: ${{ steps.commit.outputs.sha }}
+
+#         steps:
+#             - name: Checkout repository
+#               uses: actions/checkout@v7.0.1
+#               with:
+#                   fetch-depth: 1
+
+#             - name: Set commit SHA
+#               id: commit
+#               run: echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+#             - name: Validate repository
+#               run: |
+#                   echo "Repository: $GITHUB_REPOSITORY"
+#                   echo "Ref: $GITHUB_REF"
+#                   echo "Event: $GITHUB_EVENT_NAME"
+
+#     build-nodejs-app:
+#         name: Build and Push Node.js Backend
+#         runs-on: ubuntu-latest
+#         needs: checkout
+
+#         # Only deploy from master. PRs do not receive AWS credentials.
+#         if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+
+#         permissions:
+#             contents: read
+#             id-token: write
+
+#         steps:
+#             - name: Checkout repository
+#               uses: actions/checkout@v7.0.1
+
+#             - name: Configure AWS credentials using OIDC
+#               uses: aws-actions/configure-aws-credentials@v6.3.0
+#               with:
+#                   role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+#                   aws-region: ${{ env.AWS_REGION }}
+#                   role-session-name: GitHubActions-${{ github.run_id }}
+
+#             - name: Verify AWS identity
+#               run: aws sts get-caller-identity
+
+#             - name: Verify ECR repository
+#               run: |
+#                   aws ecr describe-repositories \
+#                     --repository-names "$ECR_REPO" \
+#                     --region "$AWS_REGION"
+
+#             - name: Login to Amazon ECR
+#               uses: aws-actions/amazon-ecr-login@v2.1.7
+
+#             - name: Build and push Docker image
+#               env:
+#                   COMMIT_SHA: ${{ needs.checkout.outputs.commit }}
+#               run: |
+#                   set -euo pipefail
+
+#                   TAG="${COMMIT_SHA}-${GITHUB_RUN_NUMBER}"
+#                   IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${TAG}"
+
+#                   echo "Building image: $IMAGE"
+
+#                   docker build --pull -t "$IMAGE" .
+#                   docker push "$IMAGE"
+
+#                   echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+#                   echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"
+
+#             - name: Record image details
+#               env:
+#                   COMMIT_SHA: ${{ needs.checkout.outputs.commit }}
+#               run: |
+#                   echo "Commit: $COMMIT_SHA"
+#                   echo "Image tag: ${COMMIT_SHA}-${GITHUB_RUN_NUMBER}"
+
+#     update-manifests:
+#         name: Update Kubernetes Manifests
+#         runs-on: ubuntu-latest
+#         needs:
+#             - checkout
+#             - build-nodejs-app
+
+#         if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+
+#         permissions:
+#             contents: write
+
+#         steps:
+#             - name: Checkout repository
+#               uses: actions/checkout@v7.0.1
+#               with:
+#                   ref: master
+#                   fetch-depth: 1
+#                   token: ${{ secrets.GITHUB_TOKEN }}
+
+#             - name: Configure Git
+#               run: |
+#                   git config user.name "github-actions[bot]"
+#                   git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+#             - name: Update Kubernetes image
+#               env:
+#                   COMMIT_SHA: ${{ needs.checkout.outputs.commit }}
+#               run: |
+#                   set -euo pipefail
+
+#                   TAG="${COMMIT_SHA}-${GITHUB_RUN_NUMBER}"
+#                   IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${TAG}"
+
+#                   test -f k8s/deployment.yaml
+
+#                   echo "Updating deployment image to: $IMAGE"
+
+#                   # Update image fields in the deployment manifest.
+#                   # If the file has multiple containers, this updates all image fields.
+#                   sed -i -E \
+#                     "s|^([[:space:]]*image:[[:space:]]*).*$|\1${IMAGE}|" \
+#                     k8s/deployment.yaml
+
+#                   git diff --check
+#                   git diff -- k8s/deployment.yaml
+
+#             - name: Commit and push manifest changes
+#               run: |
+#                   set -euo pipefail
+
+#                   git add k8s/deployment.yaml
+
+#                   if git diff --cached --quiet; then
+#                     echo "No manifest changes to commit."
+#                     exit 0
+#                   fi
+
+#                   git commit -m "chore(gitops): deploy image ${GITHUB_SHA}-${GITHUB_RUN_NUMBER}"
+
+#                   git push origin HEAD:master
+
+#     notify-argocd:
+#         name: Trigger ArgoCD Sync
+#         runs-on: ubuntu-latest
+#         needs:
+#             - update-manifests
+
+#         if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+
+#         steps:
+#             - name: Trigger ArgoCD sync
+#               env:
+#                   ARGOCD_HOST: ${{ secrets.ARGOCD_HOST }}
+#                   ARGOCD_USERNAME: ${{ secrets.ARGOCD_USERNAME }}
+#                   ARGOCD_PASSWORD: ${{ secrets.ARGOCD_PASSWORD }}
+#                   ARGOCD_APP_NAME: ${{ secrets.ARGOCD_APP_NAME }}
+#               run: |
+#                   set -euo pipefail
+
+#                   : "${ARGOCD_HOST:?Missing ARGOCD_HOST}"
+#                   : "${ARGOCD_USERNAME:?Missing ARGOCD_USERNAME}"
+#                   : "${ARGOCD_PASSWORD:?Missing ARGOCD_PASSWORD}"
+#                   : "${ARGOCD_APP_NAME:?Missing ARGOCD_APP_NAME}"
+
+#                   # Do not disable TLS certificate validation.
+#                   curl --fail --silent --show-error \
+#                     --user "$ARGOCD_USERNAME:$ARGOCD_PASSWORD" \
+#                     --request POST \
+#                     "https://${ARGOCD_HOST}/api/v1/applications/${ARGOCD_APP_NAME}/sync"
+
+#                   echo "ArgoCD sync request submitted."
+
+#     cleanup:
+#         name: Cleanup Old ECR Images
+#         runs-on: ubuntu-latest
+#         needs:
+#             - build-nodejs-app
+#             - update-manifests
+#             - notify-argocd
+
+#         # Never clean up images after a failed build or deployment.
+#         if: >-
+#             success() &&
+#             github.ref == 'refs/heads/master' &&
+#             github.event_name != 'pull_request'
+
+#         permissions:
+#             id-token: write
+#             contents: read
+
+#         steps:
+#             - name: Configure AWS credentials using OIDC
+#               uses: aws-actions/configure-aws-credentials@v6.3.0
+#               with:
+#                   role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+#                   aws-region: ${{ env.AWS_REGION }}
+#                   role-session-name: ECRCleanup-${{ github.run_id }}
+
+#             - name: Keep the two newest ECR images
+#               run: |
+#                   set -euo pipefail
+
+#                   echo "Checking ECR repository: $ECR_REPO"
+
+#                   aws ecr describe-repositories \
+#                     --repository-names "$ECR_REPO" \
+#                     --region "$AWS_REGION" >/dev/null
+
+#                   # List images ordered from oldest to newest.
+#                   # Keep the newest two image digests.
+#                   mapfile -t DIGESTS < <(
+#                     aws ecr describe-images \
+#                       --repository-name "$ECR_REPO" \
+#                       --region "$AWS_REGION" \
+#                       --query 'sort_by(imageDetails,&imagePushedAt)[].imageDigest' \
+#                       --output text |
+#                     tr '\t' '\n' |
+#                     sed '/^None$/d; /^$/d'
+#                   )
+
+#                   COUNT=${#DIGESTS[@]}
+#                   echo "Total image digests: $COUNT"
+
+#                   if [ "$COUNT" -le 2 ]; then
+#                     echo "Two or fewer images found. Nothing to delete."
+#                     exit 0
+#                   fi
+
+#                   DELETE_COUNT=$((COUNT - 2))
+
+#                   for ((i = 0; i < DELETE_COUNT; i++)); do
+#                     DIGEST="${DIGESTS[$i]}"
+
+#                     echo "Deleting old image digest: $DIGEST"
+
+#                     aws ecr batch-delete-image \
+#                       --repository-name "$ECR_REPO" \
+#                       --region "$AWS_REGION" \
+#                       --image-ids "imageDigest=$DIGEST"
+#                   done
+
+#                   echo "ECR cleanup completed."
+
+
+
 name: CI/CD - Build, DevSecOps, ECR and GitOps
 
 on:
-    push:
-        branches:
-            - master
-        paths-ignore:
-            - "k8s/**"
-
-    pull_request:
-        branches:
-            - master
-
-    workflow_dispatch:
+  push:
+    branches: [master]
+    paths-ignore:
+      - "k8s/**"
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
 
 permissions:
-    contents: read
+  contents: read
 
 env:
-    AWS_REGION: ${{ secrets.AWS_REGION }}
-    AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-    ECR_REPO: nodejs-oct-2026
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+  ECR_REPO: nodejs-oct-2026
 
 jobs:
-    checkout:
-        name: Checkout Repository
-        runs-on: ubuntu-latest
+  checkout:
+    name: Checkout Repository
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.commit.outputs.sha }}
 
-        outputs:
-            commit: ${{ steps.commit.outputs.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
 
-        steps:
-            - name: Checkout repository
-              uses: actions/checkout@v7.0.1
-              with:
-                  fetch-depth: 1
+      - name: Set commit SHA
+        id: commit
+        run: echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
 
-            - name: Set commit SHA
-              id: commit
-              run: echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+  build-nodejs-app:
+    name: Build and Push Node.js Backend
+    runs-on: ubuntu-latest
+    needs: checkout
+    if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
 
-            - name: Validate repository
-              run: |
-                  echo "Repository: $GITHUB_REPOSITORY"
-                  echo "Ref: $GITHUB_REF"
-                  echo "Event: $GITHUB_EVENT_NAME"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
 
-    build-nodejs-app:
-        name: Build and Push Node.js Backend
-        runs-on: ubuntu-latest
-        needs: checkout
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-        # Only deploy from master. PRs do not receive AWS credentials.
-        if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
 
-        permissions:
-            contents: read
-            id-token: write
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2.1.7
 
-        steps:
-            - name: Checkout repository
-              uses: actions/checkout@v7.0.1
+      - name: Build and push Docker image
+        env:
+          COMMIT_SHA: ${{ needs.checkout.outputs.commit }}
+        run: |
+          set -euo pipefail
 
-            - name: Configure AWS credentials using OIDC
-              uses: aws-actions/configure-aws-credentials@v6.3.0
-              with:
-                  role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-                  aws-region: ${{ env.AWS_REGION }}
-                  role-session-name: GitHubActions-${{ github.run_id }}
+          TAG="${COMMIT_SHA}-${GITHUB_RUN_NUMBER}"
+          IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${TAG}"
 
-            - name: Verify AWS identity
-              run: aws sts get-caller-identity
+          docker build --pull -t "$IMAGE" .
+          docker push "$IMAGE"
 
-            - name: Verify ECR repository
-              run: |
-                  aws ecr describe-repositories \
-                    --repository-names "$ECR_REPO" \
-                    --region "$AWS_REGION"
+  update-manifests:
+    name: Update Kubernetes Manifests
+    runs-on: ubuntu-latest
+    needs: [checkout, build-nodejs-app]
+    if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
 
-            - name: Login to Amazon ECR
-              uses: aws-actions/amazon-ecr-login@v2.1.7
+    permissions:
+      contents: write
 
-            - name: Build and push Docker image
-              env:
-                  COMMIT_SHA: ${{ needs.checkout.outputs.commit }}
-              run: |
-                  set -euo pipefail
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: master
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-                  TAG="${COMMIT_SHA}-${GITHUB_RUN_NUMBER}"
-                  IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${TAG}"
+      - name: Update manifest
+        env:
+          COMMIT_SHA: ${{ needs.checkout.outputs.commit }}
+        run: |
+          set -euo pipefail
 
-                  echo "Building image: $IMAGE"
+          TAG="${COMMIT_SHA}-${GITHUB_RUN_NUMBER}"
+          IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${TAG}"
 
-                  docker build --pull -t "$IMAGE" .
-                  docker push "$IMAGE"
+          test -f k8s/deployment.yaml
 
-                  echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
-                  echo "IMAGE_TAG=$TAG" >> "$GITHUB_ENV"
+          sed -i -E \
+            "s|^([[:space:]]*image:[[:space:]]*).*$|\1${IMAGE}|" \
+            k8s/deployment.yaml
 
-            - name: Record image details
-              env:
-                  COMMIT_SHA: ${{ needs.checkout.outputs.commit }}
-              run: |
-                  echo "Commit: $COMMIT_SHA"
-                  echo "Image tag: ${COMMIT_SHA}-${GITHUB_RUN_NUMBER}"
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-    update-manifests:
-        name: Update Kubernetes Manifests
-        runs-on: ubuntu-latest
-        needs:
-            - checkout
-            - build-nodejs-app
+          git add k8s/deployment.yaml
 
-        if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+          if git diff --cached --quiet; then
+            echo "No manifest changes."
+            exit 0
+          fi
 
-        permissions:
-            contents: write
+          git commit -m "chore(gitops): update image to ${TAG}"
+          git push origin HEAD:master
 
-        steps:
-            - name: Checkout repository
-              uses: actions/checkout@v7.0.1
-              with:
-                  ref: master
-                  fetch-depth: 1
-                  token: ${{ secrets.GITHUB_TOKEN }}
+  notify-argocd:
+    name: Trigger ArgoCD Sync
+    runs-on: ubuntu-latest
+    needs: update-manifests
+    if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
 
-            - name: Configure Git
-              run: |
-                  git config user.name "github-actions[bot]"
-                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+    steps:
+      - name: Trigger ArgoCD sync
+        env:
+          ARGOCD_HOST: ${{ secrets.ARGOCD_HOST }}
+          ARGOCD_USERNAME: ${{ secrets.ARGOCD_USERNAME }}
+          ARGOCD_PASSWORD: ${{ secrets.ARGOCD_PASSWORD }}
+          ARGOCD_APP_NAME: ${{ secrets.ARGOCD_APP_NAME }}
+        run: |
+          set -euo pipefail
 
-            - name: Update Kubernetes image
-              env:
-                  COMMIT_SHA: ${{ needs.checkout.outputs.commit }}
-              run: |
-                  set -euo pipefail
+          : "${ARGOCD_HOST:?Missing ARGOCD_HOST}"
+          : "${ARGOCD_USERNAME:?Missing ARGOCD_USERNAME}"
+          : "${ARGOCD_PASSWORD:?Missing ARGOCD_PASSWORD}"
+          : "${ARGOCD_APP_NAME:?Missing ARGOCD_APP_NAME}"
 
-                  TAG="${COMMIT_SHA}-${GITHUB_RUN_NUMBER}"
-                  IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${TAG}"
+          curl --fail --silent --show-error \
+            --user "$ARGOCD_USERNAME:$ARGOCD_PASSWORD" \
+            --request POST \
+            "https://${ARGOCD_HOST}/api/v1/applications/${ARGOCD_APP_NAME}/sync"
 
-                  test -f k8s/deployment.yaml
+  cleanup:
+    name: Cleanup Old ECR Images
+    runs-on: ubuntu-latest
+    needs: [build-nodejs-app, update-manifests, notify-argocd]
+    if: >-
+      success() &&
+      github.ref == 'refs/heads/master' &&
+      github.event_name != 'pull_request'
 
-                  echo "Updating deployment image to: $IMAGE"
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-                  # Update image fields in the deployment manifest.
-                  # If the file has multiple containers, this updates all image fields.
-                  sed -i -E \
-                    "s|^([[:space:]]*image:[[:space:]]*).*$|\1${IMAGE}|" \
-                    k8s/deployment.yaml
+      - name: Keep latest two ECR images
+        run: |
+          set -euo pipefail
 
-                  git diff --check
-                  git diff -- k8s/deployment.yaml
+          mapfile -t DIGESTS < <(
+            aws ecr describe-images \
+              --repository-name "$ECR_REPO" \
+              --region "$AWS_REGION" \
+              --query 'sort_by(imageDetails,&imagePushedAt)[].imageDigest' \
+              --output text |
+            tr '\t' '\n' |
+            sed '/^None$/d; /^$/d'
+          )
 
-            - name: Commit and push manifest changes
-              run: |
-                  set -euo pipefail
+          COUNT=${#DIGESTS[@]}
+          echo "Found $COUNT image digests."
 
-                  git add k8s/deployment.yaml
+          if [ "$COUNT" -le 2 ]; then
+            echo "Nothing to delete."
+            exit 0
+          fi
 
-                  if git diff --cached --quiet; then
-                    echo "No manifest changes to commit."
-                    exit 0
-                  fi
+          DELETE_COUNT=$((COUNT - 2))
 
-                  git commit -m "chore(gitops): deploy image ${GITHUB_SHA}-${GITHUB_RUN_NUMBER}"
+          for ((i=0; i<DELETE_COUNT; i++)); do
+            aws ecr batch-delete-image \
+              --repository-name "$ECR_REPO" \
+              --region "$AWS_REGION" \
+              --image-ids "imageDigest=${DIGESTS[$i]}"
+          done
 
-                  git push origin HEAD:master
-
-    notify-argocd:
-        name: Trigger ArgoCD Sync
-        runs-on: ubuntu-latest
-        needs:
-            - update-manifests
-
-        if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
-
-        steps:
-            - name: Trigger ArgoCD sync
-              env:
-                  ARGOCD_HOST: ${{ secrets.ARGOCD_HOST }}
-                  ARGOCD_USERNAME: ${{ secrets.ARGOCD_USERNAME }}
-                  ARGOCD_PASSWORD: ${{ secrets.ARGOCD_PASSWORD }}
-                  ARGOCD_APP_NAME: ${{ secrets.ARGOCD_APP_NAME }}
-              run: |
-                  set -euo pipefail
-
-                  : "${ARGOCD_HOST:?Missing ARGOCD_HOST}"
-                  : "${ARGOCD_USERNAME:?Missing ARGOCD_USERNAME}"
-                  : "${ARGOCD_PASSWORD:?Missing ARGOCD_PASSWORD}"
-                  : "${ARGOCD_APP_NAME:?Missing ARGOCD_APP_NAME}"
-
-                  # Do not disable TLS certificate validation.
-                  curl --fail --silent --show-error \
-                    --user "$ARGOCD_USERNAME:$ARGOCD_PASSWORD" \
-                    --request POST \
-                    "https://${ARGOCD_HOST}/api/v1/applications/${ARGOCD_APP_NAME}/sync"
-
-                  echo "ArgoCD sync request submitted."
-
-    cleanup:
-        name: Cleanup Old ECR Images
-        runs-on: ubuntu-latest
-        needs:
-            - build-nodejs-app
-            - update-manifests
-            - notify-argocd
-
-        # Never clean up images after a failed build or deployment.
-        if: >-
-            success() &&
-            github.ref == 'refs/heads/master' &&
-            github.event_name != 'pull_request'
-
-        permissions:
-            id-token: write
-            contents: read
-
-        steps:
-            - name: Configure AWS credentials using OIDC
-              uses: aws-actions/configure-aws-credentials@v6.3.0
-              with:
-                  role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-                  aws-region: ${{ env.AWS_REGION }}
-                  role-session-name: ECRCleanup-${{ github.run_id }}
-
-            - name: Keep the two newest ECR images
-              run: |
-                  set -euo pipefail
-
-                  echo "Checking ECR repository: $ECR_REPO"
-
-                  aws ecr describe-repositories \
-                    --repository-names "$ECR_REPO" \
-                    --region "$AWS_REGION" >/dev/null
-
-                  # List images ordered from oldest to newest.
-                  # Keep the newest two image digests.
-                  mapfile -t DIGESTS < <(
-                    aws ecr describe-images \
-                      --repository-name "$ECR_REPO" \
-                      --region "$AWS_REGION" \
-                      --query 'sort_by(imageDetails,&imagePushedAt)[].imageDigest' \
-                      --output text |
-                    tr '\t' '\n' |
-                    sed '/^None$/d; /^$/d'
-                  )
-
-                  COUNT=${#DIGESTS[@]}
-                  echo "Total image digests: $COUNT"
-
-                  if [ "$COUNT" -le 2 ]; then
-                    echo "Two or fewer images found. Nothing to delete."
-                    exit 0
-                  fi
-
-                  DELETE_COUNT=$((COUNT - 2))
-
-                  for ((i = 0; i < DELETE_COUNT; i++)); do
-                    DIGEST="${DIGESTS[$i]}"
-
-                    echo "Deleting old image digest: $DIGEST"
-
-                    aws ecr batch-delete-image \
-                      --repository-name "$ECR_REPO" \
-                      --region "$AWS_REGION" \
-                      --image-ids "imageDigest=$DIGEST"
-                  done
-
-                  echo "ECR cleanup completed."
+          echo "ECR cleanup complete."
