@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
         - name: nodejs-backend
-          image: 280681471871.dkr.ecr.ap-south-1.amazonaws.com/nodejs-oct-2026:4f847ee50240b55a82ad2edb2bd462ac217a8cff-11
+          image: 280681471871.dkr.ecr.ap-south-1.amazonaws.com/nodejs-oct-2026:e92d2ac1488c356d7afba6cb92081f1db6eacb92-12
           imagePullPolicy: Always
           ports:
             - containerPort: 4000
