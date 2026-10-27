@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nodejs-backend-deployment
+  labels:
+    app: nodejs-backend
+  namespace: mynodejs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nodejs-backend
+  template:
+    metadata:
+      labels:
+        app: nodejs-backend
+
+    spec:
+      containers:
+        - name: nodejs-backend
+          image: 979667334110.dkr.ecr.ap-south-1.amazonaws.com/nodejs-backend:a80e66ca173f54cb9f9e2c91c6da162a40c3d9ae-3
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 4000
+          env:
+            - name: PORT
+              value: "4000"
+            # - name: MONGO_USERNAME
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: nodejs-mongo-secret
+            #       key: MONGO_ROOT_USERNAME
+            # - name: MONGO_PASSWORD
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: nodejs-mongo-secret
+            #       key: MONGO_ROOT_PASSWORD
+            # # Construct the MONGO_URI
+            # - name: MONGO_URI
+            #   value: "mongodb://$(MONGO_USERNAME):$(MONGO_PASSWORD)@nodejs-db-service:27017/nodejs_db?authSource=admin"
