@@ -40,7 +40,7 @@ jobs:
         needs: checkout
         steps:
             - uses: actions/checkout@v4
-            - uses: aws-actions/configure-aws-credentials@v3
+            - uses: aws-actions/configure-aws-credentials@v6
               with:
                   role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
                   aws-region: ${{ secrets.AWS_REGION }}
@@ -97,7 +97,7 @@ jobs:
         needs: [build-nodejs-app, update-manifests]
         if: always()
         steps:
-            - uses: aws-actions/configure-aws-credentials@v3
+            - uses: aws-actions/configure-aws-credentials@v6
               with:
                   role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
                   aws-region: ${{ secrets.AWS_REGION }}
